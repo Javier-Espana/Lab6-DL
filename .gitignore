@@ -1,0 +1,33 @@
+# Entornos virtuales
+.venv/
+venv/
+ENV/
+env/
+
+# Datos y datasets
+data/
+*.tar.gz
+
+# Checkpoints y modelos pesados
+checkpoints/
+*.pt
+*.pth
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# LaTeX auxiliary files
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.toc
+docs/*.synctex.gz
+docs/*.fls
+docs/*.fdb_latexmk
+
+# VS Code / IDE
+.vscode/
+.idea/

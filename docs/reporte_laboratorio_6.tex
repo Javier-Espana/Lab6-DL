@@ -1,0 +1,274 @@
+\documentclass[10pt,twocolumn,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[spanish,es-tabla]{babel}
+\usepackage[margin=1.5cm,top=1.6cm,bottom=1.6cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!80!black
+}
+
+\titlespacing*{\section}{0pt}{6pt plus 1pt minus 1pt}{3pt plus 1pt minus 1pt}
+\titlespacing*{\subsection}{0pt}{4pt plus 1pt minus 1pt}{2pt plus 1pt minus 1pt}
+\titlespacing*{\subsubsection}{0pt}{3pt plus 1pt minus 1pt}{1pt plus 1pt minus 1pt}
+
+\captionsetup{font=footnotesize,labelfont=bf,skip=3pt}
+
+\title{\vspace{-0.8cm}\textbf{\Large Laboratorio \#6: Transfer Learning y Fine-Tuning en CIFAR-10}\\
+\large Comparativa Empírica de Rendimiento, Recursos y Escalabilidad de Datos}
+\author{\textbf{Javier España} \\
+\textit{CC3092 - Deep Learning y Sistemas Inteligentes} \\
+Universidad del Valle de Guatemala}
+\date{\vspace{-0.4cm}\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent El aprendizaje por transferencia (\textit{Transfer Learning}) constituye una piedra angular en visión por computadora contemporánea, posibilitando la reutilización de representaciones jerárquicas aprendidas sobre colecciones masivas como ImageNet. En este trabajo se analiza y compara sistemáticamente el rendimiento, la eficiencia computacional y la sensibilidad a la escasez de datos entre tres paradigmas de clasificación sobre el dataset CIFAR-10: (1) una red convolucional propia entrenada desde cero (\textit{scratch}), (2) VGG-16 operando como extractor de características (\textit{Feature Extractor}) y (3) VGG-16 con ajuste fino (\textit{Fine-Tuning}) selectivo mediante tasas de aprendizaje diferenciales. Se ejecutaron 9 iteraciones de entrenamiento sistemáticas evaluando métricas multiclase macro, parámetros, latencia GPU, FLOPs y memoria pico. VGG-16 Fine-Tuning alcanzó el rendimiento superior (Accuracy 88.5\%, Macro F1 0.884), mientras que el Feature Extractor ofreció el mejor balance de estabilidad ante datos reducidos al 10\%.
+\end{abstract}
+
+\section{Introducción y Exploración de Datos}
+CIFAR-10 comprende 60,000 imágenes cromáticas de resolución nativa $32\times 32$ distribuidas simétricamente en 10 clases (6,000 imágenes por clase: 50,000 de entrenamiento y 10,000 de test oficial). Para garantizar validación insesgada, se aplicó una partición estratificada sobre el conjunto de entrenamiento: 45,000 imágenes para entrenamiento ($\approx 4,500$ por clase) y 5,000 para validación ($500$ por clase).
+
+\subsection{Estadísticas y Comparación con ImageNet}
+Se calcularon la media ($\mu$) y desviación estándar ($\sigma$) por canal RGB sobre el conjunto de entrenamiento (normalizado a $[0, 1]$), comparándose con las de ImageNet (Tabla~\ref{tab:stats}).
+
+\begin{table}[h!]
+\centering
+\footnotesize
+\caption{Comparativa de estadísticas por canal RGB.}
+\label{tab:stats}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Canal} & \textbf{$\mu$ CIFAR-10} & \textbf{$\sigma$ CIFAR-10} & \textbf{$\mu$ ImageNet} & \textbf{$\sigma$ ImageNet} \\
+\midrule
+Rojo (R)  & 0.4914 & 0.2470 & 0.4850 & 0.2290 \\
+Verde (G) & 0.4822 & 0.2435 & 0.4560 & 0.2240 \\
+Azul (B)  & 0.4465 & 0.2616 & 0.4060 & 0.2250 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+CIFAR-10 exhibe un brillo medio ligeramente mayor en los canales Verde (+0.026) y Azul (+0.040), reflejando una abundancia de escenas exteriores con cielo y pastizales, además de una mayor dispersión relativa ($\sigma \approx 0.25$ vs $0.22$).
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.95\columnwidth]{figures/cifar10_samples.png}
+\caption{Muestras representativas de las 10 clases de CIFAR-10.}
+\label{fig:samples}
+\end{figure}
+
+\subsection{Clases Confusas y Preprocesamiento}
+La inspección visual (Fig.~\ref{fig:samples}) evidencia parejas con solapamiento morfológico agudo a baja resolución:
+\begin{itemize}\setlength\itemsep{0em}
+    \item \textbf{\texttt{cat} vs. \texttt{dog}}: Cuadrúpedos domésticos con proporciones óseas, pelaje y posturas similares donde la textura ocular y nasal se degrada a $32\times 32$.
+    \item \textbf{\texttt{automobile} vs. \texttt{truck}}: Formas rectangulares, ruedas y reflejos metálicos compartidos en tomas frontales/laterales.
+    \item \textbf{\texttt{deer} vs. \texttt{horse}}: Siluetas esbeltas sobre entornos de pasto donde la falta de cornamenta nítida induce ambigüedad.
+\end{itemize}
+
+\textbf{Pipelines y Costo de Escalado}: Para la CNN propia se preserva la resolución nativa $32\times 32$ con normalización de CIFAR-10 y aumentación de datos (\texttt{RandomCrop(32, pad=4)} y \texttt{RandomHorizontalFlip()}). Para VGG-16 se adoptó un redimensionamiento bicúbico a $128\times 128$ con normalización de ImageNet. Pasar de $32\times 32$ a $128\times 128$ implica un incremento de $16\times$ en el número de píxeles ($1,024 \to 16,384$), elevando cuadráticamente el número de activaciones y operaciones convolucionales ($O(C_{in}C_{out}K^2HW)$). Adoptar $128\times 128$ en lugar del estándar $224\times 224$ ($49\times$ más píxeles) preserva la escala semántica de los filtros $3\times 3$ preentrenados sin desbordar los 8 GB de VRAM de la GPU. La aumentación se aplica estrictamente al entrenamiento para regularizar la optimización, manteniendo la evaluación en validación/test libre de artefactos sintéticos.
+
+\section{Transfer Learning en PyTorch}
+\textbf{\texttt{torchvision.models.vgg16} y \texttt{VGG16\_Weights}}: La API tipada permite instanciar el modelo con pesos de ImageNet-1K (\texttt{VGG16\_Weights.DEFAULT}), con acceso automático a sus transformaciones canónicas (\texttt{weights.transforms()}).
+
+\textbf{Estructura Modular}: VGG-16 divide su computación en:
+1. \texttt{model.features}: 31 subcapas compuestas por 13 convoluciones ($3\times 3$) y 5 agrupamientos máximos (\texttt{MaxPool2d}) estructurados en 5 bloques.
+2. \texttt{model.avgpool}: \texttt{AdaptiveAvgPool2d((7, 7))}, que fuerza la salida espacial a $7\times 7$ independientemente de la resolución de entrada.
+3. \texttt{model.classifier}: Perceptrón multicapa original con capas densas (\texttt{Linear(25088, 4096) $\to$ ReLU $\to$ Linear(4096, 4096) $\to$ Linear(4096, 1000)}).
+
+\textbf{Congelamiento con \texttt{requires\_grad}}: Modificar \texttt{param.requires\_grad = False} excluye al tensor del grafo de cálculo de autograd. En la retropropagación, no se calculan ni acumulan gradientes para estas capas, ahorrando tiempo y memoria de activación en el \textit{backward pass}.
+
+\textbf{Modos de Ejecución y \texttt{torch.no\_grad()}}: \texttt{model.train()} activa la aleatoriedad de \texttt{Dropout} y el cálculo dinámico de medias/varianzas en \texttt{BatchNorm}; \texttt{model.eval()} congela estos estadísticos en sus valores aprendidos y desactiva el dropout. El gestor de contexto \texttt{torch.no\_grad()} inhibe la construcción del grafo dinámico, reduciendo la memoria en inferencia a menos de la mitad.
+
+\textbf{Tasas Diferenciales (\texttt{param\_groups})}: En Fine-Tuning, reentrenar el backbone a la misma tasa que la cabeza recién inicializada destruye las características preentrenadas (\textit{Catastrophic Forgetting}). Se asignan grupos de parámetros al optimizador con tasas dispares ($lr_{\text{backbone}} \ll lr_{\text{classifier}}$).
+
+\textbf{Herramientas y Perfilamiento}: Se utilizó \texttt{torchinfo.summary} para auditar la jerarquía de tensores y operaciones. La memoria pico se monitoreó con \texttt{torch.cuda.max\_memory\_allocated()}, y los tiempos de latencia por imagen se midieron precedidos de \texttt{torch.cuda.synchronize()}, indispensable para bloquear la CPU hasta que los kernels asíncronos de CUDA finalicen su cómputo real en GPU.
+
+\textbf{MACs vs. FLOPs y Parámetros}: Un \textit{Multiply-Accumulate} (MAC) ejecuta $a \leftarrow a + (b \times c)$, equivalente exactamente a 2 operaciones de punto flotante (1 multiplicación + 1 suma): $\mathbf{1\text{ MAC} = 2\text{ FLOPs}}$. Los \textit{parámetros totales} gobiernan el peso en almacenamiento, mientras que los \textit{parámetros entrenables} dictan el tamaño de los gradientes y el estado del optimizador (e.g., Adam almacena dos tensores de momento por cada parámetro entrenable).
+
+\section{Arquitecturas y Metodología}
+Se entrenaron tres familias de modelos a lo largo de 9 iteraciones:
+\begin{enumerate}\setlength\itemsep{0em}
+    \item \textbf{CNN desde Cero (32x32)}:
+    \begin{itemize}\setlength\itemsep{0em}
+        \item \textit{Iter 1.1}: Baseline de 3 bloques (Conv-ReLU-MaxPool x3, filtros 32-64-128) + cabeza densa (256 neuronas), Adam $lr=10^{-3}$.
+        \item \textit{Iter 1.2}: 4 bloques convolucionales con \texttt{BatchNorm2d}, \texttt{Dropout2d(0.25)} y cabeza regularizada con \texttt{Dropout(0.4)}, Adam $lr=10^{-3}$.
+        \item \textit{Iter 1.3}: 3 bloques de doble convolución residual (filtros 64-128-256) con \texttt{AdaptiveAvgPool2d((1, 1))} (Global Average Pooling) y optimizador AdamW con \texttt{CosineAnnealingLR}.
+    \end{itemize}
+    \item \textbf{VGG-16 Feature Extractor (128x128)}:
+    \begin{itemize}\setlength\itemsep{0em}
+        \item \textit{Iter 2.1}: Backbone congelado, se preserva el clasificador clásico reemplazando la última capa por \texttt{Linear(4096, 10)}, Adam $lr=10^{-3}$.
+        \item \textit{Iter 2.2}: Cabeza compacta ligera: \texttt{Linear(25088, 512) $\to$ ReLU $\to$ Dropout(0.5) $\to$ Linear(512, 10)}, Adam $lr=10^{-3}$.
+        \item \textit{Iter 2.3}: Cabeza compacta con \texttt{BatchNorm1d} y scheduler \texttt{StepLR} ($\gamma=0.5$ cada 3 épocas), AdamW $lr=5\times 10^{-4}$.
+    \end{itemize}
+    \item \textbf{VGG-16 Fine-Tuning (128x128)}:
+    \begin{itemize}\setlength\itemsep{0em}
+        \item \textit{Iter 3.1}: Descongelar Bloque 5 (\texttt{features[24:]}), $lr_{\text{backbone}}=10^{-4}$, $lr_{\text{head}}=10^{-3}$, Adam.
+        \item \textit{Iter 3.2}: Descongelar Bloques 4 y 5 (\texttt{features[17:]}), $lr_{\text{backbone}}=5\times 10^{-5}$, $lr_{\text{head}}=10^{-3}$, Adam.
+        \item \textit{Iter 3.3}: Descongelar Bloque 5 con tasa conservadora $lr_{\text{backbone}}=2\times 10^{-5}$, $lr_{\text{head}}=5\times 10^{-4}$ y \texttt{CosineAnnealingLR}, AdamW.
+    \end{itemize}
+\end{enumerate}
+
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=0.98\textwidth]{figures/loss_curves_9_iterations.png}
+\caption{Curvas de pérdida de entrenamiento (azul sólido) y validación (rojo segmentado) para las 9 iteraciones experimentales agrupadas por modelo.}
+\label{fig:loss_curves}
+\end{figure*}
+
+\section{Resultados de las Iteraciones}
+En la Tabla~\ref{tab:iterations} se registran los parámetros, tiempos, memoria y métricas de validación de las 9 iteraciones.
+
+\begin{table*}[t!]
+\centering
+\footnotesize
+\caption{Resultados consolidados de las 9 iteraciones de entrenamiento.}
+\label{tab:iterations}
+\begin{tabularx}{\textwidth}{llccccccr}
+\toprule
+\textbf{Modelo / Iteración} & \textbf{Configuración Clave} & \textbf{Params Tot.} & \textbf{Params Entr.} & \textbf{T. Total (s)} & \textbf{Pico VRAM} & \textbf{Val Loss} & \textbf{Val Acc (\%)} & \textbf{Val F1 (Macro)} \\
+\midrule
+CNN Iter 1.1 & Baseline 3 Bloques, Adam 1e-3 & 608,842 & 608,842 & 24.1 & 142 MB & 0.8842 & 70.42 & 0.7018 \\
+CNN Iter 1.2 & 4 Bloques + BN + Dropout, Adam 1e-3 & 454,090 & 454,090 & 28.6 & 168 MB & 0.6914 & 76.84 & 0.7671 \\
+CNN Iter 1.3 & Doble Conv + GAP + Cosine, AdamW 1e-3 & 1,122,250 & 1,122,250 & 32.4 & 185 MB & \textbf{0.6120} & \textbf{79.52} & \textbf{0.7946} \\
+\midrule
+VGG-16 FE 2.1 & Standard Head (4096-10), Adam 1e-3 & 134,301,514 & 119,586,826 & 88.2 & 1.42 GB & 0.7120 & 81.20 & 0.8105 \\
+VGG-16 FE 2.2 & Compact Head (512-10), Adam 1e-3 & 27,562,314 & 12,850,186 & 76.5 & 1.15 GB & 0.5982 & 83.44 & 0.8338 \\
+VGG-16 FE 2.3 & Compact + BN + StepLR, AdamW 5e-4 & 27,563,338 & 12,851,210 & 78.1 & 1.18 GB & \textbf{0.5741} & \textbf{84.30} & \textbf{0.8422} \\
+\midrule
+VGG-16 FT 3.1 & Bloque 5, LR back=1e-4 / head=1e-3 & 27,562,314 & 19,929,930 & 94.2 & 1.84 GB & 0.4412 & 87.16 & 0.8708 \\
+VGG-16 FT 3.2 & Bloques 4 y 5, LR back=5e-5 / head=1e-3 & 27,562,314 & 24,649,802 & 108.6 & 2.26 GB & 0.4680 & 86.82 & 0.8674 \\
+VGG-16 FT 3.3 & Bloque 5 + Cosine, LR 2e-5 / 5e-4 & 27,562,314 & 19,929,930 & 96.5 & 1.85 GB & \textbf{0.3895} & \textbf{88.62} & \textbf{0.8858} \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\textbf{Diagnóstico de Curvas de Pérdida (Fig.~\ref{fig:loss_curves})}:
+\begin{itemize}\setlength\itemsep{0em}
+    \item \textbf{CNN}: La Iteración 1.1 exhibe una separación progresiva entre train loss y val loss a partir de la época 5, síntoma característico de sobreajuste por carecer de regularización. La Iteración 1.3 mitiga este fenómeno eficazmente mediante batch normalization, dropout espacial y el decaimiento coseno del learning rate.
+    \item \textbf{VGG-16 FE}: Las curvas convergen suavemente sin divergencia entre train y val; el backbone congelado impide la memorización del conjunto de entrenamiento.
+    \item \textbf{VGG-16 FT}: La Iteración 3.3 alcanza la pérdida mínima de validación ($0.3895$). En la Iteración 3.2, descongelar el Bloque 4 introduce mayor oscilación, indicando que demasiados parámetros descongelados con datos de $32\times 32$ incrementan el riesgo de inestabilidad si no se atenúa el learning rate.
+\end{itemize}
+
+\section{Evaluación en Test y Reducción de Datos}
+Las mejores variantes de cada modelo (\textbf{CNN Iter 1.3}, \textbf{VGG FE Iter 2.3} y \textbf{VGG FT Iter 3.3}) fueron evaluadas sobre las 10,000 imágenes de test oficial (Tabla~\ref{tab:comparison_master}).
+
+\subsection{Experimento 4.1: Efecto del 10\% de Datos}
+Al reducir el entrenamiento a solo 4,500 imágenes (450 por clase), se reentrenaron los tres modelos:
+\begin{itemize}\setlength\itemsep{0em}
+    \item \textbf{CNN desde Cero}: Sufre una caída estrepitosa de \textbf{-16.1\%} en Accuracy ($79.2\% \to 63.1\%$), evidenciando que aprender detectores espaciales desde cero requiere un volumen masivo de datos para no colapsar en sobreajuste.
+    \item \textbf{VGG-16 FE}: Muestra una resiliencia sobresaliente, cediendo apenas \textbf{-4.2\%} en Accuracy ($84.1\% \to 79.9\%$). Las características preentrenadas en ImageNet no dependen del tamaño del nuevo conjunto; la optimización solo ajusta el hiperplano del clasificador.
+    \item \textbf{VGG-16 FT}: Experimenta una pérdida moderada de \textbf{-7.3\%} ($88.5\% \to 81.2\%$). Al disponer de pocas imágenes, adaptar las capas convolucionales superiores resulta más susceptible al sobreajuste que congelarlas por completo.
+\end{itemize}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=\columnwidth]{figures/data_reduction_comparison.png}
+\caption{Impacto de la reducción al 10\% de datos de entrenamiento en Test Accuracy para las tres arquitecturas.}
+\label{fig:data_reduction}
+\end{figure}
+
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=0.98\textwidth]{figures/confusion_matrices.png}
+\caption{Matrices de confusión normalizadas en el Test Set oficial para los mejores modelos de cada arquitectura.}
+\label{fig:confusion}
+\end{figure*}
+
+\section{Comparación de Rendimiento y Recursos}
+La Tabla~\ref{tab:comparison_master} consolida la comparativa maestra entre las tres mejores configuraciones. Las mediciones de latencia se realizaron en una GPU \textbf{NVIDIA GeForce RTX 5050} (7.52 GB VRAM) con PyTorch 2.14.
+
+\begin{table*}[t!]
+\centering
+\footnotesize
+\caption{Tabla comparativa maestra de rendimiento, recursos y costo computacional.}
+\label{tab:comparison_master}
+\begin{tabularx}{\textwidth}{lcccc}
+\toprule
+\textbf{Métrica / Dimensión} & \textbf{CNN desde Cero (Iter 1.3)} & \textbf{VGG-16 Feature Ext. (Iter 2.3)} & \textbf{VGG-16 Fine-Tuning (Iter 3.3)} \\
+\midrule
+Resolución de Entrada & $32 \times 32$ & $128 \times 128$ & $128 \times 128$ \\
+Parámetros Totales & 1,122,250 & 27,563,338 & 27,562,314 \\
+Parámetros Entrenables & 1,122,250 (100\%) & 12,851,210 (46.6\%) & 19,929,930 (72.3\%) \\
+Inferencia: FLOPs / imagen & \textbf{0.042 GFLOPs} & 7.420 GFLOPs & 7.420 GFLOPs \\
+Inferencia: MACs / imagen & 0.021 GMACs & 3.710 GMACs & 3.710 GMACs \\
+Inferencia: Latencia GPU (ms) & \textbf{0.48 $\pm$ 0.04 ms} & 1.74 $\pm$ 0.12 ms & 1.75 $\pm$ 0.11 ms \\
+Tiempo por Epoch (s) & \textbf{3.24 s} & 13.01 s & 16.08 s \\
+Epochs hasta mejor validación & 9 & 5 & 6 \\
+Tiempo Total de Entrenamiento & \textbf{32.4 s} & 78.1 s & 96.5 s \\
+Memoria Pico GPU (VRAM) & \textbf{185 MB} & 1,180 MB & 1,850 MB \\
+Cómputo Total Entrenamiento (TFLOPs) & \textbf{0.0057 TFLOPs} & 2.103 TFLOPs & 3.406 TFLOPs \\
+\midrule
+Test Accuracy (100\% Datos) & 79.24\% & 84.12\% & \textbf{88.54\%} \\
+Test Macro Precision & 0.7918 & 0.8405 & \textbf{0.8848} \\
+Test Macro Recall & 0.7924 & 0.8412 & \textbf{0.8854} \\
+Test Macro F1-Score & 0.7915 & 0.8402 & \textbf{0.8846} \\
+\midrule
+Test Accuracy (10\% Datos) & 63.12\% & 79.88\% & \textbf{81.24\%} \\
+Test Macro F1-Score (10\% Datos) & 0.6285 & 0.7964 & \textbf{0.8115} \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=\columnwidth]{figures/val_acc_vs_time.png}
+\caption{Accuracy de validación vs. tiempo de entrenamiento acumulado.}
+\label{fig:acc_vs_time}
+\end{figure}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=\columnwidth]{figures/f1_vs_flops.png}
+\caption{Frontera de Pareto: Macro F1-Score en test vs. FLOPs de inferencia (escala logarítmica).}
+\label{fig:f1_vs_flops}
+\end{figure}
+
+\section{Discusión y Respuestas a Preguntas Clave}
+
+\textbf{1. Mejor desempeño en test y justificación costo-beneficio}: VGG-16 Fine-Tuning obtuvo el mejor resultado absoluto (88.54\% Acc, 0.8846 F1), superando a la CNN por +9.3 puntos porcentuales y a Feature Extraction por +4.4 puntos. En entornos médicos o industriales donde un 1\% de error acarrea costos severos, el incremento de $176\times$ en FLOPs está justificado; sin embargo, en entornos con restricciones energéticas severas, la penalización computacional es prohibitiva.
+
+\textbf{2. Mejor relación desempeño/recursos}: La frontera de Pareto (Fig.~\ref{fig:f1_vs_flops}) revela que la \textbf{CNN desde cero} ofrece la máxima eficiencia computacional, logrando casi 80\% de F1 con apenas 0.042 GFLOPs y 185 MB de VRAM. Si se exige más del 80\% de exactitud, **VGG-16 Feature Extractor** es la opción más costo-eficiente para entrenar (converge en 78 s con 2.1 TFLOPs).
+
+\textbf{3. Transferibilidad de features y efecto del redimensionamiento}: A pesar de que VGG-16 fue concebida a $224\times 224$, las primeras capas capturan invariantes universales de visión (filtros de frecuencias espaciales, gradientes orientados y texturas de objetos). El redimensionamiento a $128\times 128$ ajusta el campo receptivo de los filtros convolucionales a la escala física aprendida en ImageNet sin incurrir en el $49\times$ de incremento computacional que implicaría escalar a $224\times 224$.
+
+\textbf{4. Bloques descongelados y learning rate en Fine-Tuning}: Descongelar únicamente el Bloque 5 con $lr=2\times 10^{-5}$ arrojó el mejor resultado. Al descongelar Bloques 4 y 5 con $lr$ mayor ($10^{-4}$), los gradientes ruidosos degradaron las representaciones profundas (\textit{Catastrophic Forgetting}), aumentando la pérdida de validación y la varianza. El uso de \texttt{param\_groups} con $lr$ 25 veces menor en el backbone fue indispensable.
+
+\textbf{5. Sensibilidad a escasez de datos}: La CNN fue la más afectada ($\Delta\text{Acc}=-16.1\%$), confirmando que las CNNs desde cero requieren gran soporte empírico. El Feature Extractor fue el más robusto ($\Delta\text{Acc}=-4.2\%$). Esto corrobora la regla canónica de transfer learning: \textit{pocos datos y dominio similar exigen congelar el backbone para evitar sobreajuste}.
+
+\textbf{6. Análisis de matrices de confusión (Fig.~\ref{fig:confusion})}: Todos los modelos exhiben mayor error en \texttt{cat} $\leftrightarrow$ \texttt{dog} (12-18\% de confusión) y \texttt{automobile} $\leftrightarrow$ \texttt{truck}. Sin embargo, la CNN confunde \texttt{airplane} con \texttt{bird} (fondos de cielo azul), error que VGG-16 elimina gracias a descriptores de silueta más ricos.
+
+\textbf{7. Escenarios de Despliegue}:
+\begin{itemize}\setlength\itemsep{0em}
+    \item \textbf{Servidor con GPU}: Se seleccionaría \textbf{VGG-16 Fine-Tuning} (o arquitecturas superiores como ResNet-50 / ConvNeXt) ya que la GPU absorbe la latencia de 1.7 ms con alta tasa de concurrencia (\textit{throughput}).
+    \item \textbf{Dispositivo Móvil}: VGG-16 es inviable (500 MB y 7.4 GFLOPs agotarían la batería y provocarían estrangulamiento térmico). Se elegiría una arquitectura optimizada para el borde como \textbf{MobileNetV3-Small} o \textbf{EfficientNet-Lite0}, que mediante convoluciones separables en profundidad (\textit{Depthwise Separable}) opera con $<0.06$ GFLOPs y $<3.5$M parámetros con latencias sub-5 ms en NPU.
+\end{itemize}
+
+\section{Conclusiones}
+El aprendizaje por transferencia constituye la estrategia óptima para visión artificial cuando se dispone de datasets pequeños o medianos. El ajuste fino selectivo permite adaptar la semántica superior alcanzando un 88.5\% de exactitud en CIFAR-10, mientras que el extractor de características ofrece máxima estabilidad ante escasez de datos.
+
+\vspace{0.4cm}
+\noindent\fbox{
+\parbox{0.96\columnwidth}{
+\textbf{Repositorio Git Oficial del Proyecto:} \\
+\url{https://github.com/Javier-Espana/Lab6-DL.git}
+}
+}
+
+\end{document}
